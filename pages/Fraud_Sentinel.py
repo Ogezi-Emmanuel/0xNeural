@@ -1,19 +1,22 @@
 import os
-from dotenv import load_dotenv
-load_dotenv()
-
-import math
 import json
-import streamlit as st
-from web3 import Web3
-from nn_model import MLP, Value
+import math
 import collections
 import time
+import logging
+import random
+import asyncio
+import aiohttp
 import pandas as pd
 import plotly.express as px
-import requests
-import random
-import logging
+import streamlit as st
+from web3 import Web3, AsyncWeb3
+from web3.providers import AsyncHTTPProvider
+from dotenv import load_dotenv
+from nn_model import MLP, Value
+
+# Standard load_dotenv() - robust for local dev and production
+load_dotenv()
 
 st.title("Web3 Mempool Sentinel")
 st.write("Live Fraud Detection Engine Powered by Pure Python")
@@ -25,14 +28,46 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 KNOWN_SCAM_ADDRESSES = [
     "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", # Example scam address 1
     "0x1234567890123456789012345678901234567890"  # Example scam address 2
-    # In a real application, this list would be loaded from a database or external API
 ]
 HISTORY_BLOCK_WINDOW = 100 # Number of recent blocks to scan for historical transfers
+ETHERSCAN_RATE_LIMIT = 5 # Requests per second
+ALCHEMY_RATE_LIMIT = 15 # Requests per second for Alchemy free tier
 # --- End Configuration ---
 
-# Web3 Connection
+# --- PERMANENT CONNECTION LAYER ---
+# This block handles Alchemy URL resolution from .env or System Environment
 alchemy_url = os.getenv("ALCHEMY_URL")
+
+# Fallback: Check if we are in a Streamlit Cloud environment or similar
+if not alchemy_url:
+    # Try to see if it's in streamlit secrets as a last resort
+    if "ALCHEMY_URL" in st.secrets:
+        alchemy_url = st.secrets["ALCHEMY_URL"]
+
+if not alchemy_url:
+    st.error("🚨 CRITICAL ERROR: ALCHEMY_URL not found.")
+    st.info("Please ensure your ALCHEMY_URL is set in your .env file or environment variables.")
+    st.stop()
+
+# Initialize providers
+etherscan_api_key = alchemy_url # Mapping as requested
+w3_async = AsyncWeb3(AsyncHTTPProvider(alchemy_url))
 w3 = Web3(Web3.HTTPProvider(alchemy_url))
+
+# Final Connection Validation (Synchronous)
+try:
+    if not w3.is_connected():
+        st.error("🚨 CONNECTION FAILED: Alchemy provider is not responding.")
+        st.stop()
+    st.success("✅ Connected to Ethereum Mainnet")
+except Exception as e:
+    st.error(f"🚨 PROVIDER ERROR: {str(e)}")
+    st.stop()
+# --- END CONNECTION LAYER ---
+
+# Semaphores for rate limiting
+etherscan_semaphore = asyncio.Semaphore(ETHERSCAN_RATE_LIMIT)
+alchemy_semaphore = asyncio.Semaphore(ALCHEMY_RATE_LIMIT)
 
 # Initialize session state variables
 if 'live_data' not in st.session_state:
@@ -43,224 +78,180 @@ MAX_RETRIES = 5
 INITIAL_RETRY_DELAY = 1  # seconds
 MAX_RETRY_DELAY = 60 # seconds
 
-def make_alchemy_request_with_retries(method, params):
+async def make_async_alchemy_request(session, method, params):
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params
+    }
     for i in range(MAX_RETRIES):
         try:
-            response = w3.provider.make_request(method, params)
-            # Check for Alchemy-specific rate limit error in the response body
-            if response and 'error' in response and 'code' in response['error'] and response['error']['code'] == 429:
-                raise requests.exceptions.RequestException("Alchemy rate limit exceeded (code 429)")
-            return response
-        except requests.exceptions.RequestException as e:
-            if "429" in str(e) or "Too Many Requests" in str(e):
+            async with session.post(alchemy_url, json=payload) as response:
+                if response.status == 429:
+                    raise aiohttp.ClientResponseError(response.request_info, response.history, status=429)
+                
+                result = await response.json()
+                if result and 'error' in result and 'code' in result['error'] and result['error']['code'] == 429:
+                    raise aiohttp.ClientResponseError(response.request_info, response.history, status=429)
+                
+                if response.status == 400:
+                    if method == "alchemy_getTokenBalances":
+                        logging.warning(f"400 Client Error for {method}. Likely too many tokens. Returning None.")
+                        return None
+                    else:
+                        logging.error(f"400 Client Error for {method}: {await response.text()}")
+                        return None
+                
+                return result
+        except aiohttp.ClientResponseError as e:
+            if e.status == 429:
                 delay = min(MAX_RETRY_DELAY, INITIAL_RETRY_DELAY * (2**i) + random.uniform(0, 1))
-                st.warning(f"Rate limit hit. Retrying in {delay:.2f} seconds... (Attempt {i+1}/{MAX_RETRIES})")
-                logging.warning(f"Rate limit hit. Retrying in {delay:.2f} seconds... (Attempt {i+1}/{MAX_RETRIES})")
-                time.sleep(delay)
-            elif "400 Client Error" in str(e):
-                if method == "alchemy_getTokenBalances":
-                    logging.warning(f"400 Client Error: Bad Request for method {method} with params {params}. This usually means too many token balances for the address. Returning None.")
-                    return None # Do not re-raise, allow outer function to handle gracefully
-                else:
-                    logging.error(f"400 Client Error: Bad Request for method {method} with params {params}. Error: {e}")
-                    raise # Re-raise the error after logging
+                logging.warning(f"Rate limit hit ({method}). Retrying in {delay:.2f}s...")
+                await asyncio.sleep(delay)
             else:
-                logging.error(f"An unhandled requests exception occurred for method {method} with params {params}. Error: {e}")
-                raise # Re-raise other request exceptions
+                logging.error(f"HTTP Error {e.status} for {method}: {e.message}")
+                return None
         except Exception as e:
-            st.error(f"An unexpected error occurred during Alchemy request: {e}")
-            logging.error(f"An unexpected error occurred during Alchemy request for method {method} with params {params}. Error: {e}")
-            raise
-    st.error(f"Failed to make Alchemy request after {MAX_RETRIES} retries.")
-    logging.error(f"Failed to make Alchemy request after {MAX_RETRIES} retries for method {method} with params {params}.")
+            logging.error(f"Unexpected error in {method}: {e}")
+            return None
     return None
 
-MAX_PAGES_PER_ADDRESS = 5 # Limit to prevent excessive fetching for very active addresses
+async def process_smart_contract(session, receiver_address):
+    # This function ONLY handles Etherscan and the Tokenizer
+    code = await w3_async.eth.get_code(receiver_address)
+    if code == b'':
+        return None, [], "N/A"
 
-def get_paginated_asset_transfers(from_block_hex, address, category, is_from_address):
-    all_transfers = []
-    page_key = None
-    for page_num in range(MAX_PAGES_PER_ADDRESS):
-        params = {
-            "fromBlock": from_block_hex,
-            "toBlock": "latest",
-            "category": category
-        }
-        if is_from_address:
-            params["fromAddress"] = address
-        else:
-            params["toAddress"] = address
-        
-        if page_key:
-            params["pageKey"] = page_key
+    etherscan_url = f"https://api.etherscan.io/v2/api?chainid=1&module=contract&action=getsourcecode&address={receiver_address}&apikey={etherscan_api_key or ''}"
+    
+    try:
+        async with etherscan_semaphore:
+            async with session.get(etherscan_url) as es_resp:
+                es_data = await es_resp.json()
+                if es_data['status'] == '1' and es_data['result'][0]['SourceCode']:
+                    contract_source_code = es_data['result'][0]['SourceCode']
+                    tokenizer_payload = {"source_code": contract_source_code}
+                    
+                    async with session.post("https://zeroxneural-tokenizer.onrender.com/api/v1/encode", json=tokenizer_payload, timeout=60) as tok_resp:
+                        if tok_resp.status == 200:
+                            token_data = await tok_resp.json()
+                            compressed_tokens = token_data.get("tokens", [])
+                            raw_len = len(contract_source_code)
+                            token_len = len(compressed_tokens)
+                            compression_ratio = f"{raw_len / token_len:.2f}X" if token_len > 0 else "0.0X"
+                            return contract_source_code, compressed_tokens, compression_ratio
+    except Exception as e:
+        logging.warning(f"Ingestion failed for {receiver_address}: {e}")
+    
+    return None, [], "N/A"
 
-        response = make_alchemy_request_with_retries("alchemy_getAssetTransfers", params)
-        
-        if response and 'result' in response and 'transfers' in response['result']:
-            all_transfers.extend(response['result']['transfers'])
-            page_key = response['result'].get('pageKey')
-            if not page_key: # No more pages
-                break
-        else:
-            logging.warning(f"No transfers or invalid response for {address} (page {page_num + 1}).")
-            break
+async def process_single_transaction(session, tx, from_block_hex, alchemy_semaphore):
+    sender_address = tx['from']
+    receiver_address = tx.get('to')
     
-    if page_key:
-        logging.warning(f"Reached MAX_PAGES_PER_ADDRESS ({MAX_PAGES_PER_ADDRESS}) for {address}. Some transfers might be truncated.")
+    tasks = []
     
-    return all_transfers
+    # Task 0: Smart Contract Ingestion (Only if it has a receiver)
+    if receiver_address and Web3.is_address(receiver_address):
+        tasks.append(process_smart_contract(session, receiver_address))
+    else:
+        async def dummy_contract_return(): return None, [], "N/A"
+        tasks.append(dummy_contract_return())
+
+    # Task 1-4: Alchemy Historical Data (Protected by a new semaphore)
+    async def fetch_alchemy_with_throttle(method, params):
+        async with alchemy_semaphore:
+            return await make_async_alchemy_request(session, method, params)
+
+    tasks.extend([
+        fetch_alchemy_with_throttle("alchemy_getAssetTransfers", {
+            "fromBlock": from_block_hex, "toBlock": "latest", "fromAddress": sender_address, "category": ["external", "erc20"]
+        }),
+        fetch_alchemy_with_throttle("alchemy_getAssetTransfers", {
+            "fromBlock": from_block_hex, "toBlock": "latest", "toAddress": sender_address, "category": ["external", "erc20"]
+        }),
+        fetch_alchemy_with_throttle("alchemy_getTokenBalances", {"owner": sender_address}),
+        fetch_alchemy_with_throttle("eth_getBalance", [sender_address, "latest"])
+    ])
+    
+    # Execute EVERYTHING simultaneously
+    results = await asyncio.gather(*tasks)
+    
+    contract_source_code, compressed_tokens, compression_ratio = results[0]
+    history_from = results[1]
+    history_to = results[2]
+    token_balances_resp = results[3]
+    ether_balance_wei = results[4]
+    
+    historical_transfers = []
+    if history_from and 'result' in history_from: historical_transfers.extend(history_from['result']['transfers'])
+    if history_to and 'result' in history_to: historical_transfers.extend(history_to['result']['transfers'])
+    
+    token_balances = []
+    if token_balances_resp and 'result' in token_balances_resp:
+        token_balances = token_balances_resp['result']['tokenBalances']
+
+    # Handle ether_balance_wei which could be a JSON-RPC dict result or a hex string
+    if isinstance(ether_balance_wei, dict) and 'result' in ether_balance_wei:
+        ether_balance_wei = ether_balance_wei['result']
+    
+    # Convert hex string to int if necessary
+    if isinstance(ether_balance_wei, str) and ether_balance_wei.startswith('0x'):
+        ether_balance_wei = int(ether_balance_wei, 16)
+    elif ether_balance_wei is None:
+        ether_balance_wei = 0
+
+    ether_balance = float(Web3.from_wei(ether_balance_wei, 'ether'))
+
+    # 3. Feature Calculation
+    history = {'sent_to': collections.defaultdict(int), 'received_from': collections.defaultdict(int), 'received_values': []}
+    for h_tx in historical_transfers:
+        if h_tx['category'] == 'external':
+            val = h_tx.get('value')
+            v_eth = 0.0
+            if isinstance(val, str): v_eth = float(Web3.from_wei(int(val, 16), 'ether'))
+            elif isinstance(val, (int, float)): v_eth = float(val)
+            
+            if h_tx['from'] == sender_address: history['sent_to'][h_tx['to']] += 1
+            elif h_tx['to'] == sender_address:
+                history['received_from'][h_tx['from']] += 1
+                history['received_values'].append(v_eth)
+
+    total_received = sum(history['received_values'])
+    unique_recv = len(history['received_from'])
+    unique_sent = len(history['sent_to'])
+    tx_freq = len(historical_transfers)
+    min_val = min(history['received_values']) if history['received_values'] else 0.0
+    max_val = max(history['received_values']) if history['received_values'] else 0.0
+
+    features = [ether_balance, tx_freq, float(Web3.from_wei(tx['value'], 'ether')), total_received, unique_recv, unique_sent, min_val, max_val]
+    
+    return {
+        "address": sender_address,
+        "features": features,
+        "receiver_address": receiver_address,
+        "contract_source_code": contract_source_code,
+        "compressed_tokens": compressed_tokens,
+        "compression_ratio": compression_ratio
+    }
+
+async def get_live_features_async():
+    latest_block = await w3_async.eth.get_block('latest', full_transactions=True)
+    if not latest_block or not latest_block.transactions:
+        st.session_state['live_data'] = []
+        return
+
+    from_block_hex = hex(max(0, latest_block.number - HISTORY_BLOCK_WINDOW))
+    transactions = latest_block.transactions[:50]
+    
+    async with aiohttp.ClientSession() as session:
+        tasks = [process_single_transaction(session, tx, from_block_hex, alchemy_semaphore) for tx in transactions]
+        results = await asyncio.gather(*tasks)
+        st.session_state['live_data'] = [r for r in results if r is not None]
 
 def get_live_features():
-    # Fetch the latest block for live transactions
-    latest_block = w3.eth.get_block('latest', full_transactions=True)
-    if not latest_block or not latest_block.transactions:
-        st.warning("No transactions found in the latest block.")
-        logging.warning("No transactions found in the latest block.")
-        st.session_state['live_data'] = [] # Ensure it's an empty list
-        return # Exit the function
-    
-    latest_block_number = latest_block.number
-    from_block_number = max(0, latest_block_number - HISTORY_BLOCK_WINDOW)
-    from_block_hex = hex(from_block_number)
-
-    transactions = latest_block.transactions[:50] # Grab the first 50
-    if not transactions:
-        st.warning("No transactions to process after filtering.")
-        logging.warning("No transactions to process after filtering.")
-        st.session_state['live_data'] = [] # Ensure it's an empty list
-        return # Exit the function
-    
-    live_data = []
-    for tx in transactions:
-        sender_address = tx['from']
-        if not w3.is_address(sender_address):
-            st.warning(f"Invalid sender address encountered: {sender_address}. Skipping transaction.")
-            logging.warning(f"Invalid sender address encountered: {sender_address}. Skipping transaction.")
-            continue
-        
-        # --- Fetch comprehensive transaction history using Alchemy API ---
-        # This is a placeholder for actual Alchemy API call and rate limit handling.
-        # In a real application, you would use Alchemy's SDK or a more robust
-        # request mechanism with proper error handling and pagination.
-        try:
-            # Using alchemy_getAssetTransfers as getTransactionHistoryByAddress is beta and might require specific setup
-            # This will fetch transfers for the sender_address as 'from' or 'to'
-            historical_transfers_from = get_paginated_asset_transfers(from_block_hex, sender_address, ["external", "erc20"], True)
-            historical_transfers_to = get_paginated_asset_transfers(from_block_hex, sender_address, ["external", "erc20"], False)
-            historical_transfers = historical_transfers_from + historical_transfers_to
-            
-            # Fetch token balances
-            token_balances_response = make_alchemy_request_with_retries(
-                "alchemy_getTokenBalances",
-                {
-                    "owner": sender_address
-                }
-            )
-            # time.sleep(ALCHEMY_API_DELAY) # Basic rate limit handling - removed, handled by retry mechanism
-            if not token_balances_response or 'result' not in token_balances_response or 'tokenBalances' not in token_balances_response['result']:
-                logging.warning(f"Invalid or empty token_balances_response for {sender_address}. Skipping.")
-                token_balances = []
-            else:
-                token_balances = token_balances_response['result']['tokenBalances']
-
-            # Fetch native Ether balance
-            ether_balance_wei = w3.eth.get_balance(sender_address)
-            ether_balance = float(w3.from_wei(ether_balance_wei, 'ether'))
-            logging.info(f"Successfully fetched data for {sender_address}.")
-            
-        except Exception as e:
-            st.warning(f"Could not fetch full transaction history or token balances for {sender_address} using Alchemy API: {e}. Using limited data.")
-            logging.warning(f"Could not fetch full transaction history or token balances for {sender_address} using Alchemy API: {e}. Using limited data.")
-            historical_transfers = [] # Fallback to empty history if API call fails
-            token_balances = [] # Fallback to empty balances if API call fails
-            ether_balance = 0.0 # Fallback to 0.0 for Ether balance
-
-        # Dictionary to store historical data for the sender
-        history = {
-            'sent_to': collections.defaultdict(int),
-            'received_from': collections.defaultdict(int),
-            'received_values': []
-        }
-
-        for h_tx in historical_transfers:
-            # For simplicity, we'll only consider 'external' transfers for value and addresses
-            # More complex logic would be needed for ERC20/ERC721/ERC1155 transfers
-            if h_tx['category'] == 'external':
-                value_raw = h_tx.get('value')
-                value_eth = 0.0 # Initialize value_eth
-
-                if value_raw is None:
-                    value_eth = 0.0
-                elif isinstance(value_raw, str):
-                    try:
-                        value_int = int(value_raw, 16)
-                        value_eth = float(w3.from_wei(value_int, 'ether'))
-                    except ValueError:
-                        logging.warning(f"Invalid hex string for transaction value: {value_raw}. Defaulting to 0.")
-                        value_eth = 0.0
-                elif isinstance(value_raw, int):
-                    value_eth = float(w3.from_wei(value_raw, 'ether'))
-                elif isinstance(value_raw, float):
-                    value_eth = value_raw # Already in Ether units
-                else:
-                    logging.warning(f"Unexpected type for transaction value: {type(value_raw)}. Value: {value_raw}. Defaulting to 0.")
-                    value_eth = 0.0
-                
-                if h_tx['from'] == sender_address:
-                    history['sent_to'][h_tx['to']] += 1
-                elif h_tx['to'] == sender_address:
-                    history['received_from'][h_tx['from']] += 1
-                    history['received_values'].append(value_eth)
-
-        # Calculate dynamic features
-        total_received = sum(history['received_values'])
-        unique_received_from = len(history['received_from'])
-        unique_sent_to = len(history['sent_to'])
-        transaction_frequency = len(historical_transfers) # Total number of historical transfers
-        
-        min_value_received = min(history['received_values']) if history['received_values'] else 0.0
-        max_value_received = max(history['received_values']) if history['received_values'] else 0.0
-        avg_value_received = (sum(history['received_values']) / len(history['received_values'])) if history['received_values'] else 0.0
-
-        # Check for interaction with known scam addresses
-        interacted_with_scam = 0.0
-        for h_tx in historical_transfers:
-            if h_tx['from'] in KNOWN_SCAM_ADDRESSES or h_tx['to'] in KNOWN_SCAM_ADDRESSES:
-                interacted_with_scam = 1.0
-                break
-        
-        # Calculate unique tokens held
-        unique_tokens_held = len(token_balances)
-
-        features = [
-            ether_balance, # Native Ether balance
-            transaction_frequency, 
-            float(w3.from_wei(tx['value'], 'ether')), # Live Ether sent
-            total_received,
-            unique_received_from,
-            unique_sent_to,
-            min_value_received,
-            max_value_received
-        ]
-        
-        # Validate the length of the features list
-        if len(features) != 8:
-            st.warning(f"Feature list for {sender_address} has unexpected length: {len(features)}. Expected 8. Skipping transaction.")
-            logging.warning(f"Feature list for {sender_address} has unexpected length: {len(features)}. Expected 8. Skipping transaction.")
-            continue
-            
-        live_data.append({"address": sender_address, "features": features})
-        
-    # Store results in Streamlit session_state instead of returning
-    st.session_state['live_data'] = live_data
-
-if w3.is_connected():
-    st.success("Connected to Ethereum Mainnet")
-    logging.info("Connected to Ethereum Mainnet.")
-else:
-    st.error("Connection Failed")
-    logging.error("Connection to Ethereum Mainnet Failed.")
-    st.stop() # Stop the app if connection fails
+    asyncio.run(get_live_features_async())
 
 # Sidebar for filtering
 st.sidebar.header("Filter Results")
@@ -354,6 +345,77 @@ def highlight_risk(row):
         return ['background-color: #E8F5E9'] * len(row) # Very light green
     return [''] * len(row)
 
+def display_results(live_transactions):
+    results = []
+    for tx in live_transactions:
+        scaled_input = normalize_features(tx['features'])
+        prediction = model(scaled_input) # Get the raw prediction
+        classification = predict_fraud(scaled_input)
+        
+        results.append({
+            "Wallet Address": tx['address'],
+            "Classification": classification,
+            "Contract Interacted": tx['receiver_address'] if tx['contract_source_code'] else "None",
+            "Tokens": len(tx['compressed_tokens']) if tx['compressed_tokens'] else 0,
+            "Compression": tx['compression_ratio'],
+            "Ether Balance": tx['features'][0],
+            "Tx Frequency": tx['features'][1],
+            "Live Ether Sent": tx['features'][2],
+            "Total Received": tx['features'][3],
+            "Unique Received From": tx['features'][4],
+            "Unique Sent To": tx['features'][5],
+            "Min Value Received": tx['features'][6],
+            "Max Value Received": tx['features'][7]
+        })
+        
+    # Calculate summary statistics
+    risk_counts = collections.defaultdict(int)
+    for res in results:
+        risk_counts[res["Classification"]] += 1
+
+    st.subheader("Risk Level Summary")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("High-Risk", risk_counts["High-Risk 🚨🚨🚨"])
+    with col2:
+        st.metric("Medium-Risk", risk_counts["Medium-Risk ⚠️⚠️"])
+    with col3:
+        st.metric("Low-Risk", risk_counts["Low-Risk 🟡"])
+    with col4:
+        st.metric("Normal", risk_counts["Normal ✅"])
+
+    # Create a DataFrame for the chart
+    risk_df = pd.DataFrame(risk_counts.items(), columns=["Risk Level", "Count"])
+    risk_df["Risk Level"] = pd.Categorical(risk_df["Risk Level"], ["High-Risk 🚨🚨🚨", "Medium-Risk ⚠️⚠️", "Low-Risk 🟡", "Normal ✅"])
+    risk_df = risk_df.sort_values("Risk Level")
+
+    st.subheader("Risk Distribution")
+    fig = px.bar(risk_df, x="Risk Level", y="Count", color="Risk Level",
+                 color_discrete_map={
+                     "High-Risk 🚨🚨🚨": "red",
+                     "Medium-Risk ⚠️⚠️": "orange",
+                     "Low-Risk 🟡": "yellow",
+                     "Normal ✅": "green"
+                 },
+                 title="Distribution of Wallet Risk Levels")
+    fig.update_layout(autosize=True) # Make the plot responsive
+    st.plotly_chart(fig)
+        
+    results_df = pd.DataFrame(results)
+
+    # Apply filter based on sidebar selection
+    if risk_level_filter != "All":
+        filtered_results = [
+            res for res in results if res["Classification"] == risk_level_filter
+        ]
+        if filtered_results:
+            filtered_results_df = pd.DataFrame(filtered_results)
+            st.dataframe(filtered_results_df.style.apply(highlight_risk, axis=1), width='stretch')
+        else:
+            st.info(f"No transactions found with risk level: {risk_level_filter}")
+    else:
+        st.dataframe(results_df.style.apply(highlight_risk, axis=1), width='stretch')
+
 if auto_refresh_enabled:
     st.write(f"Auto-refresh enabled. Updating every {refresh_interval} seconds.")
     placeholder = st.empty()
@@ -361,143 +423,13 @@ if auto_refresh_enabled:
         with placeholder.container():
             with st.spinner("Fetching live transactions..."):
                 get_live_features() # This now populates st.session_state['live_data']
-                live_transactions = st.session_state.get('live_data', [])
-                
-                results = []
-                for tx in live_transactions:
-                    scaled_input = normalize_features(tx['features'])
-                    prediction = model(scaled_input) # Get the raw prediction
-                    classification = predict_fraud(scaled_input)
-                    
-                    results.append({
-                        "Wallet Address": tx['address'],
-                        "Classification": classification,
-                        "Ether Balance": tx['features'][0], # New: Ether Balance
-                        "Tx Frequency": tx['features'][1],
-                        "Live Ether Sent": tx['features'][2],
-                        "Total Received": tx['features'][3],
-                        "Unique Received From": tx['features'][4],
-                        "Unique Sent To": tx['features'][5],
-                        "Min Value Received": tx['features'][6],
-                        "Max Value Received": tx['features'][7]
-                    })
-                    
-                # Calculate summary statistics
-                risk_counts = collections.defaultdict(int)
-                for res in results:
-                    risk_counts[res["Classification"]] += 1
-
-                st.subheader("Risk Level Summary")
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("High-Risk", risk_counts["High-Risk 🚨🚨🚨"])
-                with col2:
-                    st.metric("Medium-Risk", risk_counts["Medium-Risk ⚠️⚠️"])
-                with col3:
-                    st.metric("Low-Risk", risk_counts["Low-Risk 🟡"])
-                with col4:
-                    st.metric("Normal", risk_counts["Normal ✅"])
-
-                # Create a DataFrame for the chart
-                risk_df = pd.DataFrame(risk_counts.items(), columns=["Risk Level", "Count"])
-                risk_df["Risk Level"] = pd.Categorical(risk_df["Risk Level"], ["High-Risk 🚨🚨🚨", "Medium-Risk ⚠️⚠️", "Low-Risk 🟡", "Normal ✅"])
-                risk_df = risk_df.sort_values("Risk Level")
-
-                st.subheader("Risk Distribution")
-                fig = px.bar(risk_df, x="Risk Level", y="Count", color="Risk Level",
-                             color_discrete_map={
-                                 "High-Risk 🚨🚨🚨": "red",
-                                 "Medium-Risk ⚠️⚠️": "orange",
-                                 "Low-Risk 🟡": "yellow",
-                                 "Normal ✅": "green"
-                             },
-                             title="Distribution of Wallet Risk Levels")
-                fig.update_layout(autosize=True) # Make the plot responsive
-                st.plotly_chart(fig)
-                    
-                results_df = pd.DataFrame(results)
-                st.dataframe(results_df.style.apply(highlight_risk, axis=1), width='stretch')
-
-                # Apply filter based on sidebar selection
-                if risk_level_filter != "All":
-                    filtered_results = [
-                        res for res in results if res["Classification"] == risk_level_filter
-                    ]
-                    filtered_results_df = pd.DataFrame(filtered_results)
-                    st.dataframe(filtered_results_df.style.apply(highlight_risk, axis=1), width='stretch')
-                else:
-                    st.dataframe(results_df.style.apply(highlight_risk, axis=1), width='stretch')
+                display_results(st.session_state.get('live_data', []))
         time.sleep(refresh_interval)
 else:
     if st.button("Scan Live Mempool"):
         with st.spinner("Fetching live transactions..."):
             get_live_features() # This now populates st.session_state['live_data']
-            live_transactions = st.session_state.get('live_data', [])
-            
-            results = []
-            for tx in live_transactions:
-                scaled_input = normalize_features(tx['features'])
-                prediction = model(scaled_input) # Get the raw prediction
-                classification = predict_fraud(scaled_input)
-                
-                results.append({
-                    "Wallet Address": tx['address'],
-                    "Classification": classification,
-                    "Ether Balance": tx['features'][0], # New: Ether Balance
-                    "Tx Frequency": tx['features'][1],
-                    "Live Ether Sent": tx['features'][2],
-                    "Total Received": tx['features'][3],
-                    "Unique Received From": tx['features'][4],
-                    "Unique Sent To": tx['features'][5],
-                    "Min Value Received": tx['features'][6],
-                    "Max Value Received": tx['features'][7]
-                })
-                
-            # Calculate summary statistics
-            risk_counts = collections.defaultdict(int)
-            for res in results:
-                risk_counts[res["Classification"]] += 1
-
-            st.subheader("Risk Level Summary")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("High-Risk", risk_counts["High-Risk 🚨🚨🚨"])
-            with col2:
-                st.metric("Medium-Risk", risk_counts["Medium-Risk ⚠️⚠️"])
-            with col3:
-                st.metric("Low-Risk", risk_counts["Low-Risk 🟡"])
-            with col4:
-                st.metric("Normal", risk_counts["Normal ✅"])
-
-            # Create a DataFrame for the chart
-            risk_df = pd.DataFrame(risk_counts.items(), columns=["Risk Level", "Count"])
-            risk_df["Risk Level"] = pd.Categorical(risk_df["Risk Level"], ["High-Risk 🚨🚨🚨", "Medium-Risk ⚠️⚠️", "Low-Risk 🟡", "Normal ✅"])
-            risk_df = risk_df.sort_values("Risk Level")
-
-            st.subheader("Risk Distribution")
-            fig = px.bar(risk_df, x="Risk Level", y="Count", color="Risk Level",
-                         color_discrete_map={
-                             "High-Risk 🚨🚨🚨": "red",
-                             "Medium-Risk ⚠️⚠️": "orange",
-                             "Low-Risk 🟡": "yellow",
-                             "Normal ✅": "green"
-                         },
-                         title="Distribution of Wallet Risk Levels")
-            fig.update_layout(autosize=True) # Make the plot responsive
-            st.plotly_chart(fig)
-                
-            results_df = pd.DataFrame(results)
-            st.dataframe(results_df.style.apply(highlight_risk, axis=1), width='stretch')
-
-            # Apply filter based on sidebar selection
-            if risk_level_filter != "All":
-                filtered_results = [
-                    res for res in results if res["Classification"] == risk_level_filter
-                ]
-                filtered_results_df = pd.DataFrame(filtered_results)
-                st.dataframe(filtered_results_df.style.apply(highlight_risk, axis=1), width='stretch')
-            else:
-                st.dataframe(results_df.style.apply(highlight_risk, axis=1), width='stretch')
+            display_results(st.session_state.get('live_data', []))
 
 def verify_model_loading(model_instance):
     """
@@ -526,4 +458,3 @@ def verify_model_loading(model_instance):
 
 # Call verification function after model loading
 verify_model_loading(model)
-

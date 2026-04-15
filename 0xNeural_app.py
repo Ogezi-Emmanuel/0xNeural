@@ -1,4 +1,9 @@
 import streamlit as st
+import os
+from dotenv import load_dotenv
+
+# Load environment variables once at the entry point
+load_dotenv()
 
 st.set_page_config(
     page_title="0xNeural",
