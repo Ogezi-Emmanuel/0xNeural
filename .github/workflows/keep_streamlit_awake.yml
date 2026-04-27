@@ -1,0 +1,14 @@
+name: Streamlit 6-Hour Heartbeat
+
+on:
+  schedule:
+    # This cron syntax tells GitHub to run this exactly every 6 hours
+    - cron: "0 */6 * * *" 
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit App
+        # Replace the URL below with your actual Streamlit app URL
+        run: curl -s https://0xneural.streamlit.app/ > /dev/null
