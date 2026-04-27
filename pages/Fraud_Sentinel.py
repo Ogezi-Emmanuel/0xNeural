@@ -31,7 +31,7 @@ KNOWN_SCAM_ADDRESSES = [
 ]
 HISTORY_BLOCK_WINDOW = 100 # Number of recent blocks to scan for historical transfers
 ETHERSCAN_RATE_LIMIT = 5 # Requests per second
-ALCHEMY_RATE_LIMIT = 15 # Requests per second for Alchemy free tier
+ALCHEMY_RATE_LIMIT = 5 # Lowered to 5 to prevent server disconnections and 429s
 # --- End Configuration ---
 
 # --- PERMANENT CONNECTION LAYER ---
@@ -87,7 +87,9 @@ async def make_async_alchemy_request(session, method, params):
     }
     for i in range(MAX_RETRIES):
         try:
-            async with session.post(alchemy_url, json=payload) as response:
+            # Add a timeout to the request to prevent server hangs
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.post(alchemy_url, json=payload, timeout=timeout) as response:
                 if response.status == 429:
                     raise aiohttp.ClientResponseError(response.request_info, response.history, status=429)
                 
@@ -97,7 +99,7 @@ async def make_async_alchemy_request(session, method, params):
                 
                 if response.status == 400:
                     if method == "alchemy_getTokenBalances":
-                        logging.warning(f"400 Client Error for {method}. Likely too many tokens. Returning None.")
+                        # Silently return None for token balance errors to clean up logs
                         return None
                     else:
                         logging.error(f"400 Client Error for {method}: {await response.text()}")
@@ -243,7 +245,8 @@ async def get_live_features_async():
         return
 
     from_block_hex = hex(max(0, latest_block.number - HISTORY_BLOCK_WINDOW))
-    transactions = latest_block.transactions[:50]
+    # Reduced from 50 to 25 to significantly lower RPC load on free tier
+    transactions = latest_block.transactions[:25]
     
     async with aiohttp.ClientSession() as session:
         tasks = [process_single_transaction(session, tx, from_block_hex, alchemy_semaphore) for tx in transactions]
@@ -264,10 +267,10 @@ st.sidebar.markdown("---")
 st.sidebar.header("Auto-Refresh Settings")
 refresh_interval = st.sidebar.slider(
     "Refresh Interval (seconds)",
-    min_value=5,
-    max_value=60,
-    value=10,
-    step=5
+    min_value=15,
+    max_value=300,
+    value=60,
+    step=15
 )
 auto_refresh_enabled = st.sidebar.checkbox("Enable Auto-Refresh", value=False)
 
@@ -417,18 +420,18 @@ def display_results(live_transactions):
         st.dataframe(results_df.style.apply(highlight_risk, axis=1), width='stretch')
 
 if auto_refresh_enabled:
-    st.write(f"Auto-refresh enabled. Updating every {refresh_interval} seconds.")
-    placeholder = st.empty()
-    while auto_refresh_enabled:
-        with placeholder.container():
-            with st.spinner("Fetching live transactions..."):
-                get_live_features() # This now populates st.session_state['live_data']
-                display_results(st.session_state.get('live_data', []))
-        time.sleep(refresh_interval)
+    st.info(f"Auto-refresh is active. Scanning every {refresh_interval} seconds.")
+    with st.spinner("Fetching live transactions..."):
+        get_live_features()
+        display_results(st.session_state.get('live_data', []))
+    
+    # Wait for the specified interval and then trigger a rerun
+    time.sleep(refresh_interval)
+    st.rerun()
 else:
     if st.button("Scan Live Mempool"):
         with st.spinner("Fetching live transactions..."):
-            get_live_features() # This now populates st.session_state['live_data']
+            get_live_features()
             display_results(st.session_state.get('live_data', []))
 
 def verify_model_loading(model_instance):
@@ -456,5 +459,6 @@ def verify_model_loading(model_instance):
     logging.info("Model parameters loaded and verified as Value objects.")
     return True
 
-# Call verification function after model loading
-verify_model_loading(model)
+# Model Integrity Check (Sidebar)
+with st.sidebar.expander("Model Diagnostics"):
+    verify_model_loading(model)

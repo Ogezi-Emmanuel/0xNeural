@@ -11,14 +11,15 @@ Welcome to **0xNeural**, a comprehensive suite for advanced Web3 engineering. Th
 *   **High-Performance Execution Layer:** 
     *   **Asynchronous Architecture:** Rebuilt with `asyncio` and `aiohttp` for non-blocking network I/O.
     *   **Total Parallelism:** Concurrent execution of semantic data ingestion (Smart Contracts) and behavioral data fetching (Alchemy RPC).
-    *   **Rate-Limit Resiliency:** Integrated async Semaphores to strictly respect Etherscan and Alchemy free-tier limits, preventing silent throttling.
+    *   **Rate-Limit Resiliency (Safe Mode):** Integrated async Semaphores and throttled execution (25 transactions/block) to strictly respect Etherscan and Alchemy free-tier limits, preventing silent throttling or server disconnections.
+    *   **Responsive Auto-Refresh:** Implements a non-blocking `st.rerun` pattern for real-time monitoring without UI freezes, with configurable intervals up to 5 minutes.
 
 ### 2. The Domain-Specific BPE Tokenizer (The Ingestion Layer API)
 *   **The Architecture:** A custom Byte-Pair Encoding (BPE) text-compression algorithm, identical to the foundational layer used by GPT-4 and LLaMA, built in pure Python.
 *   **Source Code:** [Ogezi-Emmanuel/0xneural-Tokenizer](https://github.com/Ogezi-Emmanuel/0xneural-Tokenizer)
 *   **Deployment:** Deployed as a high-performance **FastAPI service** on Render: [zeroxneural-tokenizer.onrender.com](https://zeroxneural-tokenizer.onrender.com/).
 *   **The Training:** Connected to the Kaggle API to ingest and train on nearly 10 million characters of raw, verified Ethereum Smart Contracts and DeFi audit reports.
-*   **The Web3 Application:** Serves as the primary ingestion funnel for the Fraud Sentinel and future AI Smart Contract Auditors. By pushing the vocabulary hyperparameter to 300 custom merges, it achieves a **2.91X compression ratio** on complex DeFi staking contracts, vastly outperforming standard models at reading Web3 syntax.
+*   **The Web3 Application:** Serves as the primary ingestion funnel for the Fraud Sentinel. By pushing the vocabulary hyperparameter to **2000 custom merges**, it achieves over **2X the efficiency** of standard models, providing superior context preservation for Web3 syntax.
 
 ### 3. The Transformer Architecture (The "Brain") — *Up Next*
 *   **The Architecture:** The Self-Attention Mechanism. This is the exact mathematical breakthrough from the famous *Attention Is All You Need* paper.
@@ -74,7 +75,9 @@ streamlit run 0xNeural_app.py
 ## 🛠️ Technical Highlights (Fraud Sentinel)
 
 - **AsyncWeb3:** Fully non-blocking Ethereum provider integration.
-- **Concurrent `asyncio.gather`:** Processes 50+ transactions and multiple RPC calls per transaction simultaneously.
-- **Traffic Throttling:** Multi-stage semaphores (Etherscan: 5 req/s, Alchemy: 15 req/s) to ensure maximum throughput without hitting rate limits.
+- **Concurrent `asyncio.gather`:** Processes concurrent RPC calls and semantic ingestion simultaneously.
+- **Traffic Throttling:** Multi-stage semaphores (Etherscan: 5 req/s, Alchemy: 5 req/s) for maximum stability on free-tier providers.
+- **Network Resilience:** Implements 10-second request timeouts and robust retry logic to handle server disconnections and transient network errors.
 - **Robust Connection Layer:** Permanent handshake logic with fallbacks for Environment Variables, `.env` files, and Streamlit Secrets.
 - **API-Driven Ingestion:** Seamless integration with the [0xNeural Tokenizer API](https://zeroxneural-tokenizer.onrender.com/) ([GitHub](https://github.com/Ogezi-Emmanuel/0xneural-Tokenizer)) for real-time contract analysis.
+- **Non-Blocking Auto-Refresh:** Linear execution architecture using `st.rerun` for smooth UI performance.
