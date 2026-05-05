@@ -223,6 +223,38 @@ class Web3Tokenizer:
         self.merges = merges
         self.vocab = vocab
 
+    def encode(self, text):
+        # Convert text to raw bytes
+        tokens = list(text.encode("utf-8"))
+        while len(tokens) >= 2:
+            # Find the pair that can be merged first (based on the merge rules)
+            stats = {}
+            for pair in zip(tokens, tokens[1:]):
+                stats[pair] = stats.get(pair, 0) + 1
+            
+            # We want to find the pair with the lowest index in our merges (the first one that happened)
+            pair_to_merge = None
+            for pair in stats:
+                if pair in self.merges:
+                    if pair_to_merge is None or self.merges[pair] < self.merges[pair_to_merge]:
+                        pair_to_merge = pair
+            
+            if pair_to_merge is None:
+                break # no more merges possible
+                
+            idx = self.merges[pair_to_merge]
+            new_tokens = []
+            i = 0
+            while i < len(tokens):
+                if i < len(tokens) - 1 and tokens[i] == pair_to_merge[0] and tokens[i+1] == pair_to_merge[1]:
+                    new_tokens.append(idx)
+                    i += 2
+                else:
+                    new_tokens.append(tokens[i])
+                    i += 1
+            tokens = new_tokens
+        return tokens
+
     def decode(self, ids):
         # Map IDs back to raw bytes and decode to string
         tokens = b"".join(self.vocab[idx] for idx in ids)
@@ -299,7 +331,19 @@ tokenizer = brain["tokenizer"]
 # --- UI Interface ---
 st.markdown("### 🖥️ Neural Output Terminal")
 
-if st.button("Generate Solidity Code"):
+col_left, col_right = st.columns([1, 1])
+
+with col_left:
+    st.markdown("#### 🎲 Random Hallucination")
+    st.write("Let the model generate code from a blank state.")
+    gen_random = st.button("Generate Random Code")
+
+with col_right:
+    st.markdown("#### 🧠 Seeded Generation")
+    seed_text = st.text_area("Start the contract:", value="contract FlashLoan {", height=100)
+    gen_seeded = st.button("Generate from Seed")
+
+if gen_random or gen_seeded:
     st.markdown("""
         <div class="terminal-header">
             <div class="terminal-dot" style="background: #FF5F56;"></div>
@@ -310,29 +354,37 @@ if st.button("Generate Solidity Code"):
         """, unsafe_allow_html=True)
     
     placeholder = st.empty()
-    full_text = ""
     
-    # Start with a newline or some common start token
-    context = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
-    
-    with st.spinner("Decoding from latent space..."):
-        # We generate in chunks to simulate "watching it hallucinate"
-        for i in range(16): # 16 * 32 = 512 tokens
-            generated_indices = model.generate(context, max_new_tokens=32)
-            # Only get the new tokens for decoding
-            new_ids = generated_indices[0, -32:].tolist()
-            
-            # STICT OUTPUT LOGIC: Only render decoded strings, never internal token IDs
-            if tokenizer:
+    if gen_random:
+        context = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
+        full_text = ""
+        with st.spinner("Decoding from latent space..."):
+            for i in range(16):
+                generated_indices = model.generate(context, max_new_tokens=32)
+                new_ids = generated_indices[0, -32:].tolist()
                 new_text = tokenizer.decode(new_ids)
                 full_text += new_text
                 placeholder.code(full_text, language='solidity')
-            else:
-                placeholder.error("🚨 Tokenizer Error: 'web3_tokenizer_2000_merges.json' not found in the project root. Please ensure the file is uploaded.")
-                break
-                
-            context = generated_indices
-            time.sleep(0.05)
+                context = generated_indices
+                time.sleep(0.05)
+    
+    elif gen_seeded:
+        with st.spinner("Encoding seed and projecting..."):
+            input_ids = tokenizer.encode(seed_text)
+            context = torch.tensor([input_ids], dtype=torch.long, device=DEVICE)
+            full_text = seed_text
+            
+            # Show initial seed
+            placeholder.code(full_text, language='solidity')
+            
+            for i in range(12): # Generate ~384 more tokens
+                generated_indices = model.generate(context, max_new_tokens=32)
+                new_ids = generated_indices[0, -32:].tolist()
+                new_text = tokenizer.decode(new_ids)
+                full_text += new_text
+                placeholder.code(full_text, language='solidity')
+                context = generated_indices
+                time.sleep(0.05)
 
 # Sidebar Status Indicators
 st.sidebar.markdown("### 🧠 Brain Status")
