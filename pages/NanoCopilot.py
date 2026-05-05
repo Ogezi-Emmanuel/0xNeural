@@ -309,12 +309,12 @@ def load_model_resource():
         raise RuntimeError(f"Error loading weights: {e}")
 
 # --- Caching Layer (Session Persistence) ---
-@st.cache_resource
-def get_cached_brain():
+@st.cache_resource(ttl=3600) # Added TTL to help with cache rotation
+def get_cached_brain(version="1.0.1"): # Incremented version to force cache invalidation
     try:
         tokenizer = load_tokenizer_resource()
         model = load_model_resource()
-        return {"model": model, "tokenizer": tokenizer, "success": True}
+        return {"model": model, "tokenizer": tokenizer, "success": True, "version": version}
     except Exception as e:
         return {"error": str(e), "success": False}
 
@@ -322,11 +322,17 @@ def get_cached_brain():
 brain = get_cached_brain()
 
 if not brain["success"]:
-    st.error(brain["error"])
+    st.error(f"🧠 Brain Load Error: {brain['error']}")
     st.stop()
 
 model = brain["model"]
 tokenizer = brain["tokenizer"]
+
+# Double-check that the tokenizer has the encode method (safety for stale caches)
+if not hasattr(tokenizer, 'encode'):
+    st.warning("🔄 Stale cache detected. Refreshing tokenizer resources...")
+    st.cache_resource.clear()
+    st.rerun()
 
 # --- UI Interface ---
 st.markdown("### 🖥️ Neural Output Terminal")
