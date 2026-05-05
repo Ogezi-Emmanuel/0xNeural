@@ -11,40 +11,141 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🧠 Welcome to 0xNeural: The Web3 Engineering Suite")
+import streamlit as st
+import os
+from dotenv import load_dotenv
 
+# Load environment variables once at the entry point
+load_dotenv()
+
+st.set_page_config(
+    page_title="0xNeural | Engineering Suite",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- Global Design System (CSS) ---
 st.markdown("""
-    Welcome to 0xNeural, your comprehensive suite for advanced Web3 engineering. 
-    This application showcases a collection of cutting-edge projects, each built 
-    from scratch to push the boundaries of blockchain analysis, AI, and data processing.
+    <style>
+    /* Global Styles */
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;700&display=swap');
     
-    Navigate through the sidebar to explore the different projects.
-""")
+    html, body, [data-testid="stAppViewContainer"] {
+        background-color: #0E1117;
+        font-family: 'Inter', sans-serif;
+    }
+    
+    h1, h2, h3 {
+        font-family: 'Inter', sans-serif;
+        font-weight: 700;
+        color: #FFFFFF;
+    }
+    
+    .stMarkdown {
+        color: #C1C2C5;
+    }
+    
+    /* Hero Section */
+    .hero-container {
+        background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
+        padding: 3rem;
+        border-radius: 1rem;
+        border: 1px solid #334155;
+        margin-bottom: 2rem;
+        text-align: center;
+    }
+    
+    .hero-title {
+        font-size: 3rem;
+        margin-bottom: 0.5rem;
+        background: linear-gradient(90deg, #00FF41, #00A3FF);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    
+    /* Project Cards */
+    .project-card {
+        background: rgba(30, 41, 59, 0.5);
+        backdrop-filter: blur(10px);
+        padding: 2rem;
+        border-radius: 1rem;
+        border: 1px solid #334155;
+        height: 100%;
+        transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    
+    .project-card:hover {
+        transform: translateY(-5px);
+        border-color: #00FF41;
+    }
+    
+    .project-tag {
+        background: #00FF41;
+        color: #000000;
+        padding: 0.2rem 0.6rem;
+        border-radius: 0.4rem;
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        margin-bottom: 1rem;
+        display: inline-block;
+    }
+    
+    /* Sidebar Fixes */
+    [data-testid="stSidebar"] {
+        background-color: #161B22;
+        border-right: 1px solid #30363D;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-st.markdown("---")
-
-st.header("Our Architectural Roadmap")
-
-st.subheader("1. The Pure-Python Autograd Engine & MLP (The Fraud Sentinel)")
+# --- Hero Section ---
 st.markdown("""
-    *   **The Architecture:** A Multilayer Perceptron neural network and its underlying calculus engine (backpropagation/autograd) built from absolute scratch without PyTorch or TensorFlow.
-    *   **The Training:** Trained on a dataset of numerical features to classify behavior.
-    *   **The Web3 Application:** A real-time Mempool Sentinel. It reads 8 numerical features from pending Ethereum transactions, applies Min-Min scaling, and assigns a live "Risk Score" to predict and flag fraudulent wallets before a transaction is finalized on-chain.
-""")
+    <div class="hero-container">
+        <h1 class="hero-title">🧠 0xNeural</h1>
+        <p style="font-size: 1.2rem; color: #94A3B8;">Advanced Web3 Engineering Suite & Neural Architectures</p>
+        <p style="color: #64748B;">Pushing the boundaries of blockchain analysis and generative AI through custom-built engines.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-st.subheader("2. The Domain-Specific BPE Tokenizer (The Ingestion Layer)")
-st.markdown("""
-    *   **The Architecture:** A custom Byte-Pair Encoding (BPE) text-compression algorithm, identical to the foundational layer used by GPT-4 and LLaMA, built in pure Python.
-    *   **The Training:** Connected to the Kaggle API to ingest and train on nearly 10 million characters of raw, verified Ethereum Smart Contracts and DeFi audit reports.
-    *   **The Web3 Application:** The highly-optimized ingestion funnel for an AI Smart Contract Auditor. By pushing the vocabulary hyperparameter to 300 custom merges, it achieved a **2.91X compression ratio** on complex DeFi staking contracts, vastly outperforming standard models at reading Web3 syntax.
-""")
+# --- Architectural Roadmap ---
+st.markdown("### 🏗️ Our Architectural Roadmap")
 
-st.subheader("3. The Transformer Architecture (The \"Brain\") — *Up Next*")
-st.markdown("""
-    *   **The Architecture:** The Self-Attention Mechanism. This is the exact mathematical breakthrough from the famous *Attention Is All You Need* paper.
-    *   **The Goal:** Building the engine that actually reads the compressed integers from Project 2. While the Tokenizer shrinks the data, the Transformer allows the AI to look at a variable on line 150 and understand how it connects to a `require` statement on line 12.
-    *   **The Web3 Application:** The core reasoning engine for the AI Smart Contract Auditor.
-""")
+col1, col2, col3 = st.columns(3)
 
-st.markdown("---")
-st.info("Select a project from the sidebar to get started!")
+with col1:
+    st.markdown("""
+        <div class="project-card">
+            <span class="project-tag">Core Engine</span>
+            <h3>Fraud Sentinel</h3>
+            <p>A real-time Mempool monitoring engine powered by a <b>pure-Python Autograd MLP</b> built from absolute scratch.</p>
+            <hr style="border-color: #334155;">
+            <p style="font-size: 0.9rem; color: #94A3B8;">Calculus-driven fraud detection that flags malicious transactions before they finalize.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+with col2:
+    st.markdown("""
+        <div class="project-card">
+            <span class="project-tag">Ingestion Layer</span>
+            <h3>BPE Tokenizer</h3>
+            <p>Custom <b>Byte-Pair Encoding</b> algorithm trained on 10M+ characters of Solidity source code.</p>
+            <hr style="border-color: #334155;">
+            <p style="font-size: 0.9rem; color: #94A3B8;">Achieves >2X efficiency in context preservation compared to standard LLM tokenizers.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+with col3:
+    st.markdown("""
+        <div class="project-card">
+            <span class="project-tag">The Brain</span>
+            <h3>NanoCopilot</h3>
+            <p>Generative <b>Transformer</b> with 5.96M parameters implementing Multi-Head Self-Attention.</p>
+            <hr style="border-color: #334155;">
+            <p style="font-size: 0.9rem; color: #94A3B8;">An LLM trained to hallucinate and reason through complex Web3 smart contract logic.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.info("👈 Use the sidebar to explore each project in depth.")

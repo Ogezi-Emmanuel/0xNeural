@@ -18,8 +18,87 @@ from nn_model import MLP, Value
 # Standard load_dotenv() - robust for local dev and production
 load_dotenv()
 
-st.title("Web3 Mempool Sentinel")
-st.write("Live Fraud Detection Engine Powered by Pure Python")
+st.set_page_config(
+    page_title="0xNeural | Fraud Sentinel",
+    page_icon="🚨",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- Global Design System (CSS) ---
+st.markdown("""
+    <style>
+    /* Global Styles */
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;700&display=swap');
+    
+    html, body, [data-testid="stAppViewContainer"] {
+        background-color: #0E1117;
+        font-family: 'Inter', sans-serif;
+    }
+    
+    h1, h2, h3 {
+        font-family: 'Inter', sans-serif;
+        font-weight: 700;
+        color: #FFFFFF;
+    }
+    
+    /* Hero Section */
+    .hero-container {
+        background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
+        padding: 2rem;
+        border-radius: 1rem;
+        border: 1px solid #334155;
+        margin-bottom: 2rem;
+        text-align: left;
+    }
+    
+    .hero-title {
+        font-size: 2.5rem;
+        margin-bottom: 0.5rem;
+        background: linear-gradient(90deg, #FF4B4B, #FF8E53);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+
+    /* Metric Cards */
+    [data-testid="stMetricValue"] {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 1.8rem !important;
+    }
+    
+    .metric-card {
+        background: rgba(30, 41, 59, 0.4);
+        padding: 1.5rem;
+        border-radius: 0.75rem;
+        border: 1px solid #334155;
+        text-align: center;
+    }
+
+    /* Sidebar Fixes */
+    [data-testid="stSidebar"] {
+        background-color: #161B22;
+        border-right: 1px solid #30363D;
+    }
+    
+    /* Risk Badges */
+    .risk-high { color: #FF4B4B; font-weight: bold; }
+    .risk-medium { color: #FFA500; font-weight: bold; }
+    .risk-low { color: #FFFF00; font-weight: bold; }
+    .risk-normal { color: #00FF41; font-weight: bold; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- Hero Section ---
+st.markdown("""
+    <div class="hero-container">
+        <h1 class="hero-title">🚨 Fraud Sentinel</h1>
+        <p style="font-size: 1.1rem; color: #94A3B8;">Real-time Mempool monitoring engine powered by a pure-Python Autograd MLP.</p>
+        <div style="display: flex; gap: 10px; margin-top: 10px;">
+            <span style="background: #1E293B; color: #00FF41; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; border: 1px solid #00FF41;">LIVE MONITORING</span>
+            <span style="background: #1E293B; color: #00A3FF; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; border: 1px solid #00A3FF;">AUTOGRAD ENGINE</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -339,13 +418,13 @@ def predict_fraud(normalized_features):
 
 def highlight_risk(row):
     if row["Classification"] == "High-Risk 🚨🚨🚨":
-        return ['background-color: #FFEBEE'] * len(row) # Very light red
+        return ['background-color: rgba(255, 75, 75, 0.2); color: #FF4B4B; border: 1px solid #FF4B4B'] * len(row)
     elif row["Classification"] == "Medium-Risk ⚠️⚠️":
-        return ['background-color: #FFF3E0'] * len(row) # Very light orange
+        return ['background-color: rgba(255, 165, 0, 0.2); color: #FFA500; border: 1px solid #FFA500'] * len(row)
     elif row["Classification"] == "Low-Risk 🟡":
-        return ['background-color: #FFFDE7'] * len(row) # Very light yellow
+        return ['background-color: rgba(255, 255, 0, 0.1); color: #FFFF00; border: 1px solid #FFFF00'] * len(row)
     elif row["Classification"] == "Normal ✅":
-        return ['background-color: #E8F5E9'] * len(row) # Very light green
+        return ['background-color: rgba(0, 255, 65, 0.1); color: #00FF41; border: 1px solid #00FF41'] * len(row)
     return [''] * len(row)
 
 def display_results(live_transactions):
@@ -376,10 +455,10 @@ def display_results(live_transactions):
     for res in results:
         risk_counts[res["Classification"]] += 1
 
-    st.subheader("Risk Level Summary")
+    st.markdown("### 📊 Network Health Summary")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("High-Risk", risk_counts["High-Risk 🚨🚨🚨"])
+        st.metric("High-Risk", risk_counts["High-Risk 🚨🚨🚨"], delta=None, delta_color="normal")
     with col2:
         st.metric("Medium-Risk", risk_counts["Medium-Risk ⚠️⚠️"])
     with col3:
@@ -392,19 +471,26 @@ def display_results(live_transactions):
     risk_df["Risk Level"] = pd.Categorical(risk_df["Risk Level"], ["High-Risk 🚨🚨🚨", "Medium-Risk ⚠️⚠️", "Low-Risk 🟡", "Normal ✅"])
     risk_df = risk_df.sort_values("Risk Level")
 
-    st.subheader("Risk Distribution")
+    st.markdown("### 📈 Risk Distribution")
     fig = px.bar(risk_df, x="Risk Level", y="Count", color="Risk Level",
+                 template="plotly_dark",
                  color_discrete_map={
-                     "High-Risk 🚨🚨🚨": "red",
-                     "Medium-Risk ⚠️⚠️": "orange",
-                     "Low-Risk 🟡": "yellow",
-                     "Normal ✅": "green"
-                 },
-                 title="Distribution of Wallet Risk Levels")
-    fig.update_layout(autosize=True) # Make the plot responsive
-    st.plotly_chart(fig)
+                     "High-Risk 🚨🚨🚨": "#FF4B4B",
+                     "Medium-Risk ⚠️⚠️": "#FFA500",
+                     "Low-Risk 🟡": "#FFFF00",
+                     "Normal ✅": "#00FF41"
+                 })
+    fig.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=300
+    )
+    st.plotly_chart(fig, use_container_width=True)
         
     results_df = pd.DataFrame(results)
+
+    st.markdown("### 🔍 Live Transaction Feed")
 
     # Apply filter based on sidebar selection
     if risk_level_filter != "All":
